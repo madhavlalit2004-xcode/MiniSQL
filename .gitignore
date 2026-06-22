@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+minisql_data/
+.DS_Store
