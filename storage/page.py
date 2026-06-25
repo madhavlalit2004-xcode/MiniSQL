@@ -13,6 +13,7 @@ class PageFullError(Exception):
     """"""
 class CorruptPageError(Exception):
     """"""
+
 @dataclass
 class PageHeader:
     num_slots_used: int
@@ -21,6 +22,7 @@ class PageHeader:
 class Page:
     def __init__(self, record_size: int, capacity: Optional[int] = None):
         self.record_size = record_size
+        
         if capacity is None:
             capacity = self._max_capacity_for(record_size)
         self.capacity = capacity
@@ -29,7 +31,11 @@ class Page:
 
         self.occupied: list[bool] = [False] * self.capacity
 
-        self.slots: list[bytes] = [b"\x00" * record_size for _ in range(self.capacity)]
+        self.slots: list[bytes] = []
+        for _ in range(self.capacity):
+            empty_record = b"\x00" * record_size
+            self.slots.append(empty_record)
+
         self.num_slots_used = 0
 
     @classmethod
