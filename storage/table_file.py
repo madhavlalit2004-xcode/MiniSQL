@@ -122,7 +122,7 @@ def decode_row(schema: Schema, raw: bytes) -> dict[str, Any]:
         cursor += NULL_FLAG_SIZE
 
         value_size = col.data_type.byte_size()
-        value_bytes = raw[cursor.cursor + value_size]
+        value_bytes = raw[cursor: cursor + value_size]
         cursor += value_size
 
         if null_flag == NULL_FLAG_NULL:
@@ -131,3 +131,101 @@ def decode_row(schema: Schema, raw: bytes) -> dict[str, Any]:
             row[col.name] = col.data_type.decode(value_bytes)
     return row
 
+
+class TableFile:
+    def __init__(self, file_path: str, schema: Schema):
+        self.file_path = file_path
+        self.schema = schema
+
+        if not os.path.exists(file_path):
+            open(file_path, "wb").close()
+
+    def _num_pages(self) -> int:
+        size = os.path.getsize(self.file_path)
+        if size % PAGE_SIZE != 0:
+            raise CorruptPageError(
+                f"{self.file_path} size {size} is not a multiple of PAGE_SIZE "
+                f"({PAGE_SIZE}) - file may be corrupted or truncated"
+            )
+        return size // PAGE_SIZE
+    
+    def _read_page(self, page_number: int) -> Page:
+        with open(self.file_path, "rb") as f:
+            f.seek(page_number * PAGE_SIZE)
+            raw = f.read(PAGE_SIZE)
+        if len(raw) != PAGE_SIZE:
+            raise CorruptPageError(
+                f"Expected to read {PAGE_SIZE} bytes for page {page_number},  "
+                f"got {len(raw)} - file may be truncated"
+            )
+        return Page.from_bytes(raw, record_size=self.schema.record_size)
+    
+    def _write_page(self, page_number: int, page: Page) -> None:
+        with open(self.file_path, "r+b") as f:
+            f.seek(page_number * PAGE_SIZE)
+            f.write(page.to_bytes())
+
+    def _append_new_page(self, page: Page) -> int:
+        page_number = self._num_pages()
+        with open(self.file_path, "ab") as f:
+            f.write(page.to_bytes())
+        return page_number
+    
+    def insert(self, values: dict[str, Any]) -> RowID:
+        record_bytes = encode_row(self.schema, values)
+        num_pages = self._num_pages()
+
+        for page_number in range(num_pages):
+            page = self._read_page(page_number)
+            if page.has_free_slot():
+                slot_number = page.insert(record_bytes)
+                self._write_page(page_number, page)
+                return RowID(page_number, slot_number)
+            
+        new_page = Page(record_size=self.schema.record_size)
+        slot_number = new_page.insert(record_bytes)
+        page_number = self._append_new_page(new_page)
+        return RowID(page_number, slot_number)
+    
+    def get(self, row_id: RowID) -> dict[str, Any]:
+        page = self._read_page(row_id.page_number)
+        raw = page.get(row_id.slot_number)
+        if raw is None:
+            raise RowNotFoundError(f"No row at {row_id}")
+        return decode_row(self.schema, raw)
+    
+    def update(self, row_id: RowID, values: dict[str, Any]) -> None:
+        record_bytes = encode_row(self.schema, values)
+        page = self._read_page(row_id.page_number)
+        if page.get(row_id.slot_number) is None:
+            raise RowNotFoundError(f"No row at {row_id}")
+        page.update(row_id.slot_number, record_bytes)
+        self._write_page(row_id.page_number, page)
+
+    def delete(self, row_id: RowID) -> None:
+        page = self._read_page(row_id.page_number)
+        if page.get(row_id.slot_number) is None:
+            raise RowNotFoundError(f"No row at {row_id}")
+        page.delete(row_id.slot_number)
+        self._write_page(row_id.page_number, page)
+
+    def scan(self) -> Iterator[tuple[RowID, dict[str, Any]]]:
+        num_pages = self._num_pages()
+        for page_number in range(num_pages):
+            page = self._read_page(page_number)
+            for slot_number, raw in page.iter_occupied():
+                row_id = RowID(page_number, slot_number)
+                yield row_id, decode_row(self.schema, raw)
+
+    def count_rows(self) -> int:
+        return sum(1 for _ in self.scan())
+    
+    def truncate(self) -> None:
+        open(self.file_path, "wb").close()
+
+    def __repr__(self) -> str:
+        return (
+            f"TableFile(path={self.file_path!r}, "
+            f"record_size={self.schema.record_size}, "
+            f"pages={self._num_pages()})"
+        )
