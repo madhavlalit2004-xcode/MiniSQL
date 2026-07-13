@@ -182,3 +182,5 @@ def resolve_type(sql_type_name: str, length: int | None = None) -> DataType:
             return base_type
  
     raise DataTypeError(f"Unknown SQL data type: {sql_type_name!r}")
+
+    
